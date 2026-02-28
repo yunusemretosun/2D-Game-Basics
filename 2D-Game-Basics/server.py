@@ -2,7 +2,7 @@ import socket
 import threading
 import json
 import time
-import math
+import random
 from dataclasses import dataclass, field
 
 HOST = "0.0.0.0"
@@ -14,13 +14,13 @@ RESPAWN_DELAY = 3.0
 PLAYER_MAX_HP = 100
 PROJECTILE_SPEED = 5.0
 PROJECTILE_DAMAGE = 20
-PROJECTILE_LIFETIME = 3.0  # seconds
+PROJECTILE_LIFETIME = 3.0
 
-# Team spawn areas: (x, y) — each team spawns together on one side
+# Team 0 = left base, Team 1 = right base, Team 2 = center top
 TEAM_SPAWN_AREAS = {
-    0: [(50, 200), (70, 200), (90, 200)],     # left side
-    1: [(460, 200), (480, 200), (500, 200)],   # right side
-    2: [(250, 100), (270, 100), (290, 100)],   # center top
+    0: [(48, 248), (64, 248), (80, 248)],      # far left elevated base
+    1: [(896, 248), (880, 248), (864, 248)],    # far right elevated base
+    2: [(240, 212), (256, 212), (272, 212)],    # center, above mid platform
 }
 
 TEAM_COLORS = [
@@ -31,6 +31,38 @@ TEAM_COLORS = [
     [180, 60,  220],
     [60,  200, 200],
 ]
+
+# ── Power-up system ───────────────────────────────────────────────────────────
+POWER_UP_TYPES = ["speed", "jump", "shield", "rapid_fire", "double_jump"]
+
+POWER_UP_DURATIONS = {
+    "speed":       10.0,   # 2x speed for 10s
+    "jump":        10.0,   # 2x jump height for 10s
+    "shield":       5.0,   # immune to damage for 5s
+    "rapid_fire":   8.0,   # 3x fire rate for 8s
+    "double_jump": 10.0,   # mid-air jump for 10s
+}
+
+POWER_UP_COLORS = {
+    "speed":       [255, 215, 0],
+    "jump":        [0, 220, 80],
+    "shield":      [0, 180, 255],
+    "rapid_fire":  [255, 80, 0],
+    "double_jump": [200, 0, 255],
+}
+
+# Fixed spawn positions on the map (on top of platforms/floor tiles)
+POWER_UP_SPAWN_LOCATIONS = [
+    (112, 316),   # left area, main floor
+    (288, 316),   # left-center, main floor
+    (480, 224),   # on center mid-platform (row 16)
+    (672, 316),   # right-center, main floor
+    (848, 316),   # right area, main floor
+    (320, 156),   # on a mid-height platform
+    (640, 156),   # on a mid-height platform (other side)
+]
+
+POWER_UP_RESPAWN_TIME = 15.0  # seconds until power-up reappears
 
 
 @dataclass
@@ -48,6 +80,7 @@ class PlayerState:
     hp: int = PLAYER_MAX_HP
     respawn_timer: float = 0.0
     ready: bool = False
+    shield_until: float = 0.0
 
 
 @dataclass
@@ -62,11 +95,22 @@ class Projectile:
     lifetime: float = PROJECTILE_LIFETIME
 
 
+@dataclass
+class PowerUp:
+    pu_id: int
+    pu_type: str
+    spawn_x: float
+    spawn_y: float
+    active: bool = True
+    respawn_timer: float = 0.0
+
+
 class GameServer:
     def __init__(self):
         self.players: dict[int, PlayerState] = {}
         self.clients: dict[int, socket.socket] = {}
         self.projectiles: dict[int, Projectile] = {}
+        self.power_ups: dict[int, PowerUp] = {}
         self.next_id: int = 0
         self.next_proj_id: int = 0
         self.lock = threading.Lock()
@@ -121,10 +165,8 @@ class GameServer:
 
     def start_game(self) -> None:
         self.game_started = True
-        # Assign spawn positions per team
         for p in self.players.values():
             spawns = TEAM_SPAWN_AREAS.get(p.team_id, TEAM_SPAWN_AREAS[0])
-            # Count how many players in this team already spawned before this one
             team_members = [pp for pp in self.players.values()
                            if pp.team_id == p.team_id]
             idx = team_members.index(p) % len(spawns)
@@ -132,8 +174,16 @@ class GameServer:
             p.x, p.y = float(sx), float(sy)
             p.hp = PLAYER_MAX_HP
             p.alive = True
+            p.shield_until = 0.0
 
-        # Send game_start to everyone with their spawn position
+        # Initialize power-ups at fixed locations, cycling through types
+        shuffled_types = POWER_UP_TYPES.copy()
+        random.shuffle(shuffled_types)
+        for i, (sx, sy) in enumerate(POWER_UP_SPAWN_LOCATIONS):
+            pu_type = shuffled_types[i % len(shuffled_types)]
+            pu = PowerUp(pu_id=i, pu_type=pu_type, spawn_x=float(sx), spawn_y=float(sy))
+            self.power_ups[i] = pu
+
         for p in self.players.values():
             self.send_to(p.player_id, {
                 "type": "game_start",
@@ -169,6 +219,7 @@ class GameServer:
         })
 
     def tick_projectiles(self, dt: float) -> None:
+        now = time.time()
         to_remove = []
         for pid, proj in list(self.projectiles.items()):
             proj.x += proj.vx * dt * 60
@@ -177,9 +228,6 @@ class GameServer:
             if proj.lifetime <= 0 or proj.x < -50 or proj.x > 1100 or proj.y > 500:
                 to_remove.append(pid)
                 continue
-            # Check collision with players
-            proj_rect_x = proj.x
-            proj_rect_y = proj.y
             for plr in list(self.players.values()):
                 if plr.player_id == proj.owner_id:
                     continue
@@ -187,9 +235,11 @@ class GameServer:
                     continue
                 if not plr.alive:
                     continue
-                # Simple AABB: projectile is 4x4, player is 5x13
-                if (proj_rect_x + 4 > plr.x and proj_rect_x < plr.x + 5 and
-                        proj_rect_y + 4 > plr.y and proj_rect_y < plr.y + 13):
+                # Shield check
+                if now < plr.shield_until:
+                    continue
+                if (proj.x + 4 > plr.x and proj.x < plr.x + 5 and
+                        proj.y + 4 > plr.y and proj.y < plr.y + 13):
                     plr.hp -= PROJECTILE_DAMAGE
                     self.broadcast({
                         "type": "projectile_hit",
@@ -213,7 +263,41 @@ class GameServer:
         for pid in to_remove:
             self.projectiles.pop(pid, None)
 
+    def tick_power_ups(self, dt: float) -> None:
+        now = time.time()
+        for pu in list(self.power_ups.values()):
+            if not pu.active:
+                pu.respawn_timer -= dt
+                if pu.respawn_timer <= 0:
+                    pu.active = True
+                    # Cycle to next type
+                    idx = POWER_UP_TYPES.index(pu.pu_type)
+                    pu.pu_type = POWER_UP_TYPES[(idx + 1) % len(POWER_UP_TYPES)]
+                continue
+            # Check player pickup (power-up hitbox 10x10)
+            for plr in list(self.players.values()):
+                if not plr.alive:
+                    continue
+                if (plr.x < pu.spawn_x + 10 and plr.x + 5 > pu.spawn_x and
+                        plr.y < pu.spawn_y + 10 and plr.y + 13 > pu.spawn_y):
+                    pu.active = False
+                    pu.respawn_timer = POWER_UP_RESPAWN_TIME
+                    duration = POWER_UP_DURATIONS[pu.pu_type]
+                    # Server-side effects
+                    if pu.pu_type == "shield":
+                        plr.shield_until = now + duration
+                    self.broadcast({
+                        "type": "powerup_pickup",
+                        "pu_id": pu.pu_id,
+                        "pu_type": pu.pu_type,
+                        "player_id": plr.player_id,
+                        "duration": duration,
+                    })
+                    print(f"Player {plr.player_id} picked up {pu.pu_type}")
+                    break
+
     def build_world_msg(self) -> dict:
+        now = time.time()
         return {
             "type": "world",
             "players": {
@@ -226,6 +310,7 @@ class GameServer:
                     "alive": p.alive,
                     "name": p.name,
                     "hp": p.hp,
+                    "shield_active": now < p.shield_until,
                 }
                 for pid, p in self.players.items()
             },
@@ -237,20 +322,23 @@ class GameServer:
                 }
                 for pid, pr in self.projectiles.items()
             },
+            "power_ups": {
+                str(pu.pu_id): {
+                    "x": pu.spawn_x,
+                    "y": pu.spawn_y,
+                    "type": pu.pu_type,
+                    "active": pu.active,
+                }
+                for pu in self.power_ups.values()
+            },
         }
 
     def check_win_condition(self) -> None:
-        alive_teams = set()
-        for p in self.players.values():
-            if p.alive or p.respawn_timer > 0:
-                alive_teams.add(p.team_id)
-        # Also count teams that have alive members
         truly_alive = set()
         for p in self.players.values():
             if p.alive:
                 truly_alive.add(p.team_id)
         if len(truly_alive) <= 1 and self.game_started:
-            # Check if any dead players are still respawning
             any_respawning = any(not p.alive and p.respawn_timer > 0 for p in self.players.values())
             if any_respawning:
                 return
@@ -284,6 +372,7 @@ class GameServer:
         p.vx = p.vy = 0.0
         p.alive = True
         p.hp = PLAYER_MAX_HP
+        p.shield_until = 0.0
         self.broadcast({
             "type": "respawn",
             "player_id": player_id,
@@ -321,7 +410,6 @@ class GameServer:
             if p and not self.game_started:
                 team_id = int(msg.get("team_id", 0))
                 if 0 <= team_id < NUM_TEAMS:
-                    # Check team capacity
                     count = sum(1 for pp in self.players.values() if pp.team_id == team_id)
                     max_per_team = max(1, MAX_PLAYERS // NUM_TEAMS)
                     if count < max_per_team or p.team_id == team_id:
@@ -400,6 +488,7 @@ class GameServer:
                 if self.game_started and self.players:
                     self.tick_respawns(interval)
                     self.tick_projectiles(interval)
+                    self.tick_power_ups(interval)
                     self.broadcast(self.build_world_msg())
 
     def run(self) -> None:
