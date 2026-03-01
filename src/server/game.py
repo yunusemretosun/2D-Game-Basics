@@ -1,5 +1,6 @@
 """GameServer: networking, game logic, ticking."""
 import json
+import math
 import random
 import socket
 import threading
@@ -146,7 +147,10 @@ class GameServer:
 
         weapon   = WEAPONS.get(p.weapon, WEAPONS["pistol"])
         speed    = weapon["bullet_speed"]
-        lifetime = weapon["range_px"] / (speed * 60)
+        range_px = float(weapon["range_px"])
+        # Safety lifetime: slightly longer than the time it takes to travel range_px
+        # at its full speed, so range_px check is always the primary terminator.
+        lifetime = range_px / (speed * 60) * 1.5 + 0.5
         damage   = weapon["damage"]
         p.reload_until = now + weapon["reload_time"]
 
@@ -162,6 +166,7 @@ class GameServer:
                 y=p.y + PLAYER_H // 2,
                 vx=vx, vy=vy,
                 lifetime=lifetime, damage=damage, weapon_id=p.weapon,
+                range_px=range_px, dist=0.0,
             )
             self.projectiles[pid] = proj
 
@@ -186,102 +191,146 @@ class GameServer:
     # ── Tick functions ────────────────────────────────────────────────────────
 
     def tick_projectiles(self, dt: float) -> None:
-        now = time.time()
-        to_remove = []
+        """Move projectiles in 2-px sub-steps to prevent tunneling.
+
+        Each projectile is advanced in small increments (≤ 2 px) and checked
+        for hits at every sub-step, so even the fastest bullet (sniper 42 px/tick)
+        cannot pass through the narrowest target (player 8 px wide).
+
+        Bullets are removed when:
+          • proj.dist >= proj.range_px  →  range exhausted (visual bullet fade)
+          • hit player or object        →  normal removal
+          • safety lifetime timeout     →  fallback
+        """
+        _STEP = 2.0          # max pixels advanced per sub-step
+        now   = time.time()
+        to_remove: list[int] = []
 
         for pid, proj in list(self.projectiles.items()):
-            proj.x        += proj.vx * dt * 60
-            proj.y        += proj.vy * dt * 60
+            # Safety timeout (prevents zombified projectiles)
             proj.lifetime -= dt
-
-            if proj.lifetime <= 0 or proj.x < -100 or proj.x > 1150 or proj.y > 550:
+            if proj.lifetime <= 0:
                 to_remove.append(pid)
                 continue
 
-            hit = False
-
-            # ── Check player hits ──────────────────────────────────────────
-            for plr in list(self.players.values()):
-                if plr.player_id == proj.owner_id or plr.team_id == proj.team_id:
-                    continue
-                if not plr.alive or now < plr.shield_until:
-                    continue
-                if (proj.x + 4 > plr.x and proj.x < plr.x + PLAYER_W and
-                        proj.y + 4 > plr.y and proj.y < plr.y + PLAYER_H):
-                    plr.hp -= proj.damage
-                    self.broadcast({
-                        "type": "projectile_hit",
-                        "proj_id": pid, "victim_id": plr.player_id,
-                        "damage": proj.damage, "hp": max(0, plr.hp),
-                        "x": proj.x, "y": proj.y,
-                    })
-                    to_remove.append(pid)
-                    hit = True
-
-                    if plr.hp <= 0:
-                        plr.alive         = False
-                        plr.hp            = 0
-                        plr.respawn_timer = RESPAWN_DELAY
-                        self._drop_weapon(plr)
-
-                        killer = self.players.get(proj.owner_id)
-                        if killer:
-                            killer.coins += KILL_COIN_REWARD
-                            killer.kills += 1
-                            self.team_kills[killer.team_id] = \
-                                self.team_kills.get(killer.team_id, 0) + 1
-                            self.send_to(proj.owner_id, {
-                                "type": "coins_update", "coins": killer.coins
-                            })
-
-                        self.broadcast({
-                            "type": "player_killed",
-                            "victim_id": plr.player_id,
-                            "killer_id": proj.owner_id,
-                            "x": plr.x, "y": plr.y,
-                        })
-                        self.check_win_condition()
-                    break
-
-            if hit:
+            # Total displacement this tick
+            mx = proj.vx * dt * 60
+            my = proj.vy * dt * 60
+            tick_dist = math.hypot(mx, my)
+            if tick_dist == 0:
+                to_remove.append(pid)
                 continue
 
-            # ── Check breakable-object hits ────────────────────────────────
-            for obj in list(self.objects.values()):
-                if not obj.alive:
-                    continue
-                ox, oy = obj.x, obj.y
-                # approximate object hitbox (will differ by type but 16×32 covers most)
-                ow, oh = 16, 32
-                if (proj.x + 4 > ox and proj.x < ox + ow and
-                        proj.y + 4 > oy - oh and proj.y < oy + 4):
-                    obj.hp -= BREAKABLE_PROJECTILE_DAMAGE
-                    self.broadcast({
-                        "type": "object_hit",
-                        "obj_id": obj.obj_id, "hp": max(0, obj.hp),
-                        "x": proj.x, "y": proj.y,
-                    })
-                    to_remove.append(pid)
-                    if obj.hp <= 0:
-                        obj.alive = False
-                        lo, hi    = BREAKABLE_COIN_RANGE[obj.obj_type]
-                        coins     = random.randint(lo, hi)
-                        self.broadcast({
-                            "type": "object_destroyed",
-                            "obj_id": obj.obj_id,
-                            "x": obj.x, "y": obj.y,
-                            "coins": coins,
-                        })
-                        # Give coins to the killer (owner of projectile)
-                        shooter = self.players.get(proj.owner_id)
-                        if shooter:
-                            shooter.coins += coins
-                            self.send_to(proj.owner_id, {
-                                "type": "coins_update", "coins": shooter.coins
-                            })
+            n_steps  = max(1, int(math.ceil(tick_dist / _STEP)))
+            sx       = mx / n_steps
+            sy       = my / n_steps
+            sub_len  = tick_dist / n_steps
+
+            hit            = False
+            range_expired  = False
+
+            for _ in range(n_steps):
+                proj.x    += sx
+                proj.y    += sy
+                proj.dist += sub_len
+
+                # ── Range check: bullet has traveled its full range ────────
+                if proj.dist >= proj.range_px:
+                    range_expired = True
                     break
 
-        for pid in to_remove:
+                # ── World-bounds safety (far outside map) ─────────────────
+                if proj.x < -100 or proj.x > 1150 or proj.y < -200 or proj.y > 650:
+                    range_expired = True
+                    break
+
+                # ── Player hits ───────────────────────────────────────────
+                for plr in list(self.players.values()):
+                    if plr.player_id == proj.owner_id or plr.team_id == proj.team_id:
+                        continue
+                    if not plr.alive or now < plr.shield_until:
+                        continue
+                    if (proj.x + 4 > plr.x and proj.x < plr.x + PLAYER_W and
+                            proj.y + 4 > plr.y and proj.y < plr.y + PLAYER_H):
+                        plr.hp -= proj.damage
+                        self.broadcast({
+                            "type":      "projectile_hit",
+                            "proj_id":   pid, "victim_id": plr.player_id,
+                            "damage":    proj.damage, "hp": max(0, plr.hp),
+                            "x": proj.x, "y": proj.y,
+                        })
+                        to_remove.append(pid)
+                        hit = True
+
+                        if plr.hp <= 0:
+                            plr.alive         = False
+                            plr.hp            = 0
+                            plr.respawn_timer = RESPAWN_DELAY
+                            self._drop_weapon(plr)
+
+                            killer = self.players.get(proj.owner_id)
+                            if killer:
+                                killer.coins += KILL_COIN_REWARD
+                                killer.kills += 1
+                                self.team_kills[killer.team_id] = \
+                                    self.team_kills.get(killer.team_id, 0) + 1
+                                self.send_to(proj.owner_id, {
+                                    "type": "coins_update", "coins": killer.coins
+                                })
+
+                            self.broadcast({
+                                "type":      "player_killed",
+                                "victim_id": plr.player_id,
+                                "killer_id": proj.owner_id,
+                                "x": plr.x, "y": plr.y,
+                            })
+                            self.check_win_condition()
+                        break
+
+                if hit:
+                    break
+
+                # ── Breakable-object hits ─────────────────────────────────
+                for obj in list(self.objects.values()):
+                    if not obj.alive:
+                        continue
+                    ox, oy = obj.x, obj.y
+                    ow, oh = 16, 32   # covers tree/barrel/crate hitboxes
+                    if (proj.x + 4 > ox and proj.x < ox + ow and
+                            proj.y + 4 > oy - oh and proj.y < oy + 4):
+                        obj.hp -= BREAKABLE_PROJECTILE_DAMAGE
+                        self.broadcast({
+                            "type":   "object_hit",
+                            "obj_id": obj.obj_id, "hp": max(0, obj.hp),
+                            "x": proj.x, "y": proj.y,
+                        })
+                        to_remove.append(pid)
+                        if obj.hp <= 0:
+                            obj.alive = False
+                            lo, hi    = BREAKABLE_COIN_RANGE[obj.obj_type]
+                            coins     = random.randint(lo, hi)
+                            self.broadcast({
+                                "type":   "object_destroyed",
+                                "obj_id": obj.obj_id,
+                                "x": obj.x, "y": obj.y,
+                                "coins":  coins,
+                            })
+                            shooter = self.players.get(proj.owner_id)
+                            if shooter:
+                                shooter.coins += coins
+                                self.send_to(proj.owner_id, {
+                                    "type": "coins_update", "coins": shooter.coins
+                                })
+                        hit = True
+                        break
+
+                if hit:
+                    break
+
+            if range_expired:
+                to_remove.append(pid)
+
+        for pid in set(to_remove):
             self.projectiles.pop(pid, None)
 
     def tick_dropped_weapons(self, dt: float) -> None:

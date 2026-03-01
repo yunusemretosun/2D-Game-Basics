@@ -91,9 +91,11 @@ class Projectile:
     y:         float
     vx:        float
     vy:        float
-    lifetime:  float = 3.0
+    lifetime:  float = 3.0    # safety timeout (seconds)
     damage:    int   = 20
     weapon_id: str   = "pistol"
+    range_px:  float = 300.0  # max travel distance in pixels
+    dist:      float = 0.0    # distance traveled so far
 
 
 @dataclass
