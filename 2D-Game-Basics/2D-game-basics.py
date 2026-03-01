@@ -17,6 +17,31 @@ TEAM_NAMES = ["Red", "Blue", "Green", "Yellow", "Purple", "Cyan"]
 
 POWER_UP_LIFETIME = 12.0  # must match server POWER_UP_LIFETIME
 
+# ── Weapon system (mirrors server) ────────────────────────────────────────────
+SHOP_X      = 464   # world-pixel x center of shop (filled in from game_start)
+SHOP_Y      = 256   # world-pixel y (top of center platform tile)
+SHOP_RADIUS = 55
+
+DROPPED_WEAPON_LIFE = 20.0  # must match server
+
+WEAPONS = {}   # filled from server's game_start message
+
+# Local weapon display data (visual constants only, not gameplay)
+WEAPON_COLORS = {
+    "pistol":    (210, 210, 210),
+    "auto":      (255, 200,  50),
+    "semi_auto": ( 80, 200, 255),
+    "sniper":    (255,  50,  50),
+    "shotgun":   (255, 140,  40),
+}
+WEAPON_BULLET_SIZE = {   # (trail_length, line_width)
+    "pistol":    (6,  2),
+    "auto":      (8,  2),
+    "semi_auto": (8,  2),
+    "sniper":    (14, 1),
+    "shotgun":   (4,  3),
+}
+
 # ── Power-up visuals ──────────────────────────────────────────────────────────
 PU_COLORS = {
     "speed":       (255, 215, 0),
@@ -57,13 +82,23 @@ lobby_data     = None
 game_started   = False
 my_ready       = False
 
-THROW_COOLDOWN_NORMAL = 0.4
-THROW_COOLDOWN_RAPID  = 0.13
 last_throw_time = 0
 
 # Local power-up effect timers  {type: expiry_timestamp}
 active_effects = {}
 mid_air_jump_available = False   # for double_jump ability
+
+# ── Weapon state ──────────────────────────────────────────────────────────────
+my_weapon         = "pistol"
+my_coins          = 30
+my_reload_until   = 0.0   # timestamp when player can shoot again
+firing            = False  # K_f held (auto-fire)
+fire_requested    = False  # K_f just pressed (semi)
+shop_open         = False
+near_shop         = False
+dropped_weapons_world = {}
+buy_error_msg     = ""
+buy_error_until   = 0.0
 
 
 def send_msg(sock, msg):
@@ -226,6 +261,132 @@ def draw_shield_aura(surf, x, y):
     pygame.draw.ellipse(aura, (0, 180, 255, alpha), (0, 0, 26, 28), 2)
     surf.blit(aura, (x - 8, y - 6))
 
+
+def draw_bullet(surf, x, y, vx, vy, weapon_id):
+    """Draw a smooth elongated bullet with a trail."""
+    color = WEAPON_COLORS.get(weapon_id, (220, 220, 220))
+    length, width = WEAPON_BULLET_SIZE.get(weapon_id, (6, 2))
+    speed = (vx * vx + vy * vy) ** 0.5
+    if speed == 0:
+        pygame.draw.circle(surf, color, (int(x), int(y)), width)
+        return
+    dx, dy = vx / speed, vy / speed
+    tx, ty = int(x), int(y)
+    tail_x, tail_y = int(x - dx * length), int(y - dy * length)
+    # Trail (dimmer)
+    trail = tuple(max(0, c // 3) for c in color)
+    pygame.draw.line(surf, trail, (tx, ty), (tail_x, tail_y), max(1, width - 1))
+    # Bright core (half length)
+    mid_x, mid_y = int(x - dx * length // 2), int(y - dy * length // 2)
+    pygame.draw.line(surf, color, (tx, ty), (mid_x, mid_y), width)
+    # Tip highlight
+    pygame.draw.circle(surf, (255, 255, 255), (tx, ty), max(1, width - 1))
+
+
+def draw_dropped_weapon(surf, x, y, weapon_id, lifetime):
+    """Draw a weapon pickup on the ground."""
+    color = WEAPON_COLORS.get(weapon_id, (200, 200, 200))
+    # Blink when about to expire
+    if lifetime < 5.0 and int(time.time() * 5) % 2 == 0:
+        return
+    pygame.draw.rect(surf, color, (x, y, 12, 5))
+    pygame.draw.rect(surf, (255, 255, 255), (x, y, 12, 5), 1)
+    wname = WEAPONS.get(weapon_id, {}).get("name", weapon_id)
+    lbl = font_small.render(wname, True, color)
+    surf.blit(lbl, (x + 6 - lbl.get_width() // 2, y - 10))
+    # Lifetime bar
+    frac = max(0.0, lifetime / DROPPED_WEAPON_LIFE)
+    bar_col = (255, 60, 60) if frac < 0.3 else (255, 200, 0) if frac < 0.6 else (100, 220, 100)
+    pygame.draw.rect(surf, (40, 40, 40), (x - 1, y + 6, 14, 2))
+    pygame.draw.rect(surf, bar_col, (x - 1, y + 6, max(1, int(14 * frac)), 2))
+
+
+def draw_shop_sign(surf, wx, wy):
+    """Draw the weapon shop building at world-pixel (wx, wy = floor y)."""
+    # Building body
+    pygame.draw.rect(surf, (100, 70, 40), (wx - 14, wy - 28, 28, 28))
+    # Roof
+    pygame.draw.polygon(surf, (160, 50, 50),
+                        [(wx - 16, wy - 28), (wx, wy - 42), (wx + 16, wy - 28)])
+    # Windows
+    pygame.draw.rect(surf, (180, 220, 255), (wx - 11, wy - 24, 8, 7))
+    pygame.draw.rect(surf, (180, 220, 255), (wx + 3,  wy - 24, 8, 7))
+    # Door
+    pygame.draw.rect(surf, (60, 35, 15), (wx - 4, wy - 14, 8, 14))
+    # Sign
+    sign_bg = pygame.Surface((26, 10), pygame.SRCALPHA)
+    sign_bg.fill((240, 200, 40, 220))
+    surf.blit(sign_bg, (wx - 13, wy - 44))
+    sign_txt = font_small.render("SHOP", True, (20, 20, 20))
+    surf.blit(sign_txt, (wx - sign_txt.get_width() // 2, wy - 44))
+
+
+def draw_shop_ui(surf, coins, current_weapon):
+    """Draw the weapon shop overlay."""
+    # Dark panel
+    panel = pygame.Surface((310, 210), pygame.SRCALPHA)
+    panel.fill((10, 10, 30, 220))
+    ox, oy = 45, 45
+    surf.blit(panel, (ox, oy))
+    pygame.draw.rect(surf, (200, 160, 40), (ox, oy, 310, 210), 2)
+
+    title = font_med.render("WEAPON SHOP", True, (255, 200, 40))
+    surf.blit(title, (ox + 155 - title.get_width() // 2, oy + 5))
+
+    coin_surf = font_small.render(f"Coins: {coins}", True, (255, 215, 0))
+    surf.blit(coin_surf, (ox + 5, oy + 22))
+
+    close_hint = font_small.render("[E] Close", True, (160, 160, 160))
+    surf.blit(close_hint, (ox + 305 - close_hint.get_width(), oy + 22))
+
+    wlist = list(WEAPONS.items())
+    for i, (wid, wdata) in enumerate(wlist):
+        col_i = i % 2
+        row_i = i // 2
+        bx = ox + 8  + col_i * 153
+        by = oy + 38 + row_i * 82
+
+        is_owned   = (wid == current_weapon)
+        can_afford = coins >= wdata["price"]
+
+        bg = (30, 80, 30) if is_owned else (25, 25, 50)
+        pygame.draw.rect(surf, bg, (bx, by, 145, 74), border_radius=4)
+        border = (100, 220, 100) if is_owned else ((200, 200, 60) if can_afford else (80, 80, 80))
+        pygame.draw.rect(surf, border, (bx, by, 145, 74), 1, border_radius=4)
+
+        # Key hint
+        key_surf = font_small.render(f"[{i+1}]", True, (180, 180, 180))
+        surf.blit(key_surf, (bx + 3, by + 3))
+
+        # Name + color swatch
+        wcolor = WEAPON_COLORS.get(wid, (200, 200, 200))
+        pygame.draw.rect(surf, wcolor, (bx + 20, by + 5, 10, 8))
+        name_col = (180, 255, 180) if is_owned else (230, 230, 230)
+        name_surf = font_small.render(wdata["name"], True, name_col)
+        surf.blit(name_surf, (bx + 33, by + 3))
+        if is_owned:
+            eq = font_small.render("EQUIPPED", True, (100, 220, 100))
+            surf.blit(eq, (bx + 145 - eq.get_width() - 3, by + 3))
+
+        # Stats
+        dmg_s = font_small.render(f"DMG {wdata['damage']}", True, (255, 110, 110))
+        rng_s = font_small.render(f"RNG {wdata['range_px']}", True, (100, 190, 255))
+        rl_s  = font_small.render(f"RPM {int(60/wdata['reload_time'])}", True, (210, 210, 120))
+        mode_s = font_small.render(wdata["fire_mode"].upper(), True, (200, 160, 255))
+        surf.blit(dmg_s,  (bx + 3, by + 18))
+        surf.blit(rng_s,  (bx + 75, by + 18))
+        surf.blit(rl_s,   (bx + 3, by + 30))
+        surf.blit(mode_s, (bx + 75, by + 30))
+
+        # Price
+        if wdata["price"] == 0:
+            price_str, price_col = "FREE", (80, 220, 80)
+        else:
+            price_str = f"{wdata['price']} coins"
+            price_col = (255, 215, 0) if can_afford else (180, 60, 60)
+        price_surf = font_small.render(price_str, True, price_col)
+        surf.blit(price_surf, (bx + 3, by + 44))
+
 def draw_lobby(surf):
     surf.fill((30, 30, 50))
     title = font_big.render("TEAM SELECTION", True, (255, 255, 255))
@@ -303,6 +464,12 @@ while True:
             mid_air_jump_available = False
             my_team_color = TEAM_COLORS[my_team_id % len(TEAM_COLORS)]
             pygame.display.set_caption(f'Battle Arena – {player_name} (Team {TEAM_NAMES[my_team_id % len(TEAM_NAMES)]})')
+            # Store server weapon data and shop position
+            WEAPONS.update(msg.get("weapons", {}))
+            SHOP_X = msg.get("shop_x", 464)
+            SHOP_Y = msg.get("shop_y", 256)
+            my_weapon = "pistol"
+            my_coins  = 30
             print(f"Game started! Spawn at ({spawn_x}, {spawn_y})")
 
         elif mtype == "world":
@@ -310,11 +477,14 @@ while True:
                 k: v for k, v in msg["players"].items()
                 if k != str(my_player_id)
             }
-            projectiles = msg.get("projectiles", {})
-            power_ups_world = msg.get("power_ups", {})
+            projectiles           = msg.get("projectiles", {})
+            power_ups_world       = msg.get("power_ups", {})
+            dropped_weapons_world = msg.get("dropped_weapons", {})
             my_data = msg["players"].get(str(my_player_id))
             if my_data:
-                local_hp = my_data.get("hp", local_hp)
+                local_hp  = my_data.get("hp", local_hp)
+                my_weapon = my_data.get("weapon", my_weapon)
+                my_coins  = my_data.get("coins", my_coins)
 
         elif mtype == "projectile_hit":
             if msg.get("victim_id") == my_player_id:
@@ -328,14 +498,18 @@ while True:
 
         elif mtype == "respawn":
             if msg.get("player_id") == my_player_id:
-                player_rect.x    = int(msg["x"])
-                player_rect.y    = int(msg["y"])
+                player_rect.x     = int(msg["x"])
+                player_rect.y     = int(msg["y"])
                 vertical_momentum = 0
-                air_timer        = 0
-                local_alive      = True
-                local_hp         = msg.get("hp", max_hp)
+                air_timer         = 0
+                local_alive       = True
+                local_hp          = msg.get("hp", max_hp)
+                my_weapon         = msg.get("weapon", "pistol")
+                my_coins          = msg.get("coins", my_coins)
+                my_reload_until   = 0.0
                 active_effects.clear()
                 mid_air_jump_available = False
+                shop_open = False
                 print("Respawned!")
 
         elif mtype == "powerup_pickup":
@@ -346,6 +520,34 @@ while True:
                 if pu_type == "double_jump":
                     mid_air_jump_available = True
                 print(f"Picked up {pu_type} for {duration}s!")
+
+        elif mtype == "weapon_bought":
+            if True:  # sent only to buyer
+                my_weapon = msg.get("weapon_id", my_weapon)
+                my_coins  = msg.get("coins", my_coins)
+                my_reload_until = 0.0
+                shop_open = False
+                print(f"Bought {my_weapon}! ({my_coins} coins left)")
+
+        elif mtype == "weapon_pickup":
+            if msg.get("player_id") == my_player_id:
+                my_weapon = msg.get("weapon_id", my_weapon)
+                my_reload_until = 0.0
+                print(f"Picked up {my_weapon}!")
+
+        elif mtype == "coins_update":
+            my_coins = msg.get("coins", my_coins)
+
+        elif mtype == "buy_failed":
+            reason = msg.get("reason", "")
+            buy_error_msg   = "Too far from shop!" if reason == "too_far" else "Not enough coins!"
+            buy_error_until = now + 2.5
+
+        elif mtype == "weapon_dropped":
+            pass  # dropped_weapons_world updated via world msg
+
+        elif mtype == "weapon_gone":
+            dropped_weapons_world.pop(str(msg.get("drop_id")), None)
 
         elif mtype == "game_over":
             game_over_msg = msg
@@ -406,6 +608,26 @@ while True:
             if tile != '0':
                 tile_rects.append(pygame.Rect(x * 16, y * 16, 16, 16))
 
+    # ── Draw weapon shop sign ─────────────────────────────────────────────────
+    if game_started:
+        sx = SHOP_X - scroll[0]
+        sy = SHOP_Y - scroll[1]
+        draw_shop_sign(display, sx, sy)
+        # Proximity glow when near
+        dx_shop = player_rect.x - SHOP_X
+        dy_shop = player_rect.y - (SHOP_Y - 13)
+        near_shop = (dx_shop * dx_shop + dy_shop * dy_shop) <= SHOP_RADIUS ** 2
+        if near_shop and local_alive and not shop_open:
+            hint_s = font_small.render("[E] Open Shop", True, (255, 220, 80))
+            display.blit(hint_s, (sx - hint_s.get_width() // 2, sy - 56))
+
+    # ── Draw dropped weapons ──────────────────────────────────────────────────
+    for drop_str, dw in dropped_weapons_world.items():
+        dwx = int(dw["x"]) - scroll[0]
+        dwy = int(dw["y"]) - scroll[1]
+        draw_dropped_weapon(display, dwx, dwy, dw.get("weapon_id", "pistol"),
+                            dw.get("lifetime", DROPPED_WEAPON_LIFE))
+
     # ── Draw power-ups ────────────────────────────────────────────────────────
     for pu_id_str, pu in power_ups_world.items():
         if not pu.get("active"):
@@ -413,6 +635,17 @@ while True:
         pux = int(pu["x"]) - scroll[0]
         puy = int(pu["y"]) - scroll[1]
         draw_power_up(display, pux, puy, pu.get("type", "speed"), pu.get("lifetime", POWER_UP_LIFETIME))
+
+    # ── Auto-fire (held K_f for auto weapons) ────────────────────────────────
+    if local_alive and firing and WEAPONS:
+        w = WEAPONS.get(my_weapon, {})
+        if w.get("fire_mode") == "auto":
+            rapid    = active_effects.get("rapid_fire", 0) > now
+            cooldown = w.get("reload_time", 0.4) * (0.33 if rapid else 1.0)
+            if now - last_throw_time >= cooldown:
+                last_throw_time = now
+                my_reload_until = now + cooldown
+                send_msg(net_sock, {"type": "throw", "facing": facing_dir})
 
     # ── Local physics (only when alive) ───────────────────────────────────────
     if local_alive:
@@ -486,13 +719,13 @@ while True:
         name_surf = font_small.render(rp.get("name", "?"), True, (255, 255, 255))
         display.blit(name_surf, (rpx - name_surf.get_width() // 2 + 2, rpy - 12))
 
-    # ── Draw projectiles ──────────────────────────────────────────────────────
+    # ── Draw projectiles (smooth elongated bullets) ───────────────────────────
     for pid_str, pr in projectiles.items():
         prx = int(pr["x"]) - scroll[0]
         pry = int(pr["y"]) - scroll[1]
-        pr_color = TEAM_COLORS[pr.get("team_id", 0) % len(TEAM_COLORS)]
-        pygame.draw.rect(display, pr_color, (prx, pry, 4, 4))
-        pygame.draw.rect(display, (255, 255, 255), (prx, pry, 4, 4), 1)
+        draw_bullet(display, prx, pry,
+                    pr.get("vx", 1), pr.get("vy", 0),
+                    pr.get("weapon_id", "pistol"))
 
     # ── HUD ───────────────────────────────────────────────────────────────────
     hp_text = font_med.render(f"HP: {local_hp}/{max_hp}", True, (255, 255, 255))
@@ -518,8 +751,34 @@ while True:
             display.blit(eff_txt, (15, eff_y))
             eff_y += 11
 
-    hint = font_small.render("[F] Throw  [Arrow Keys] Move/Jump", True, (200, 200, 200))
+    # Weapon & coins HUD
+    wdata = WEAPONS.get(my_weapon, {})
+    wname = wdata.get("name", my_weapon)
+    wcolor = WEAPON_COLORS.get(my_weapon, (200, 200, 200))
+    weap_surf = font_med.render(f"{wname}", True, wcolor)
+    display.blit(weap_surf, (3, eff_y + 2))
+    # Reload bar
+    if my_reload_until > now and wdata:
+        reload_total = wdata.get("reload_time", 0.4)
+        frac = max(0.0, (my_reload_until - now) / reload_total)
+        pygame.draw.rect(display, (40, 40, 40), (3, eff_y + 14, 50, 3))
+        reload_col = (255, 100, 40) if frac > 0.5 else (255, 220, 40)
+        pygame.draw.rect(display, reload_col, (3, eff_y + 14, max(1, int(50 * (1 - frac))), 3))
+    # Coins
+    coin_surf = font_small.render(f"$ {my_coins}", True, (255, 215, 0))
+    display.blit(coin_surf, (3, eff_y + 20))
+
+    # Buy error message
+    if buy_error_msg and buy_error_until > now:
+        err_surf = font_small.render(buy_error_msg, True, (255, 80, 80))
+        display.blit(err_surf, (200 - err_surf.get_width() // 2, 170))
+
+    hint = font_small.render("[F] Fire  [E] Shop  [Arrows] Move/Jump", True, (200, 200, 200))
     display.blit(hint, (400 - hint.get_width() - 3, 3))
+
+    # ── Weapon shop overlay ───────────────────────────────────────────────────
+    if shop_open and WEAPONS:
+        draw_shop_ui(display, my_coins, my_weapon)
 
     # ── Game over banner ──────────────────────────────────────────────────────
     if game_over_msg:
@@ -548,27 +807,54 @@ while True:
             pygame.quit(); sys.exit()
         if event.type == KEYDOWN:
             if event.key == K_ESCAPE:
-                pygame.quit(); sys.exit()
+                if shop_open:
+                    shop_open = False
+                else:
+                    pygame.quit(); sys.exit()
             if event.key == K_RIGHT:
                 moving_right = True
             if event.key == K_LEFT:
                 moving_left = True
             if event.key == K_UP:
-                if local_alive:
+                if local_alive and not shop_open:
                     jump_mult = 2.0 if active_effects.get("jump", 0) > now else 1.0
                     if air_timer < 6:
                         vertical_momentum = -5 * jump_mult
                     elif mid_air_jump_available and active_effects.get("double_jump", 0) > now:
-                        # Double jump: use mid-air jump charge
                         vertical_momentum = -5 * jump_mult
                         mid_air_jump_available = False
             if event.key == K_f:
-                if local_alive:
-                    cooldown = THROW_COOLDOWN_RAPID if active_effects.get("rapid_fire", 0) > now else THROW_COOLDOWN_NORMAL
-                    if now - last_throw_time >= cooldown:
-                        last_throw_time = now
-                        send_msg(net_sock, {"type": "throw", "facing": facing_dir})
+                if local_alive and not shop_open:
+                    firing = True
+                    w = WEAPONS.get(my_weapon, {})
+                    if w.get("fire_mode") != "auto":
+                        # Semi / shotgun / sniper: one shot per press
+                        cooldown = w.get("reload_time", 0.4)
+                        rapid = active_effects.get("rapid_fire", 0) > now
+                        effective_cd = cooldown * (0.33 if rapid else 1.0)
+                        if now - last_throw_time >= effective_cd:
+                            last_throw_time = now
+                            my_reload_until = now + effective_cd
+                            send_msg(net_sock, {"type": "throw", "facing": facing_dir})
+            # Shop number keys [1]-[5] for buying
+            if shop_open and local_alive and WEAPONS:
+                wlist = list(WEAPONS.keys())
+                for ki, kval in enumerate([K_1, K_2, K_3, K_4, K_5]):
+                    if event.key == kval and ki < len(wlist):
+                        send_msg(net_sock, {
+                            "type": "buy_weapon",
+                            "weapon_id": wlist[ki],
+                        })
+                        break
+            # E key: toggle shop
+            if event.key == K_e and game_started and local_alive:
+                if shop_open:
+                    shop_open = False
+                elif near_shop:
+                    shop_open = True
         if event.type == KEYUP:
+            if event.key == K_f:
+                firing = False
             if event.key == K_RIGHT:
                 moving_right = False
             if event.key == K_LEFT:
