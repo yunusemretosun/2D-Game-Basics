@@ -15,6 +15,8 @@ TEAM_COLORS = [
 ]
 TEAM_NAMES = ["Red", "Blue", "Green", "Yellow", "Purple", "Cyan"]
 
+POWER_UP_LIFETIME = 12.0  # must match server POWER_UP_LIFETIME
+
 # ── Power-up visuals ──────────────────────────────────────────────────────────
 PU_COLORS = {
     "speed":       (255, 215, 0),
@@ -199,7 +201,7 @@ def draw_hp_bar(surf, x, y, hp, max_hp_val, color):
         bar_color = (0, 200, 0) if hp > max_hp_val * 0.5 else (220, 180, 0) if hp > max_hp_val * 0.25 else (220, 40, 40)
         pygame.draw.rect(surf, bar_color, (bx, by, fill_w, bar_h))
 
-def draw_power_up(surf, x, y, pu_type):
+def draw_power_up(surf, x, y, pu_type, lifetime=POWER_UP_LIFETIME):
     color = PU_COLORS.get(pu_type, (255, 255, 255))
     # Pulsing circle
     t = time.time()
@@ -210,6 +212,12 @@ def draw_power_up(surf, x, y, pu_type):
     lbl_surf = font_small.render(label, True, (0, 0, 0))
     surf.blit(lbl_surf, (x + 5 - lbl_surf.get_width() // 2,
                          y + 5 - lbl_surf.get_height() // 2))
+    # Lifetime bar: shrinks as power-up approaches expiry
+    if 0 < lifetime < POWER_UP_LIFETIME:
+        frac = max(0.0, lifetime / POWER_UP_LIFETIME)
+        bar_color = (255, 60, 60) if frac < 0.3 else (255, 200, 0) if frac < 0.6 else (150, 255, 80)
+        pygame.draw.rect(surf, (50, 50, 50), (x - 1, y + 13, 12, 2))
+        pygame.draw.rect(surf, bar_color, (x - 1, y + 13, max(1, int(12 * frac)), 2))
 
 def draw_shield_aura(surf, x, y):
     t = time.time()
@@ -404,7 +412,7 @@ while True:
             continue
         pux = int(pu["x"]) - scroll[0]
         puy = int(pu["y"]) - scroll[1]
-        draw_power_up(display, pux, puy, pu.get("type", "speed"))
+        draw_power_up(display, pux, puy, pu.get("type", "speed"), pu.get("lifetime", POWER_UP_LIFETIME))
 
     # ── Local physics (only when alive) ───────────────────────────────────────
     if local_alive:
