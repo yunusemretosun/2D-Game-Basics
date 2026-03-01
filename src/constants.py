@@ -59,24 +59,32 @@ DROPPED_WEAPON_LIFE = 20.0
 WEAPON_PICKUP_DELAY = 0.6    # seconds before a freshly dropped weapon can be picked up
 
 # ── Breakable objects ─────────────────────────────────────────────────────────
-# (type, world_x, world_y_base)  – y_base = top of the tile they stand on
+# (type, world_x, world_y_base)
+# y_base = TOP of the tile the object stands on = row * TILE_SZ
+# Renderer draws sprites so their BASE aligns with y_base (sprite goes upward).
 BREAKABLE_DEFS = [
-    # type,     wx,   wy-tile-top         (object is drawn above tile top)
-    ("tree",    80,   336),   # ground left
-    ("tree",   208,   336),
-    ("barrel", 320,   336),   # near pit
-    ("barrel", 592,   336),
-    ("tree",   720,   336),
-    ("tree",   880,   336),
-    ("crate",  336,   256),   # shop platform
-    ("crate",  576,   256),
-    ("barrel",  64,   304),   # low wood platform (row 19)
-    ("barrel", 832,   304),
-    ("crate",  304,   208),   # mid platform
-    ("crate",  448,   208),
-    ("tree",   192,   160),   # high platform
-    ("tree",   544,   160),
-    ("barrel", 304,   112),   # very high
+    # Ground row 22  (tile top y = 22*16 = 352)
+    ("tree",    80,   352),   # col  5
+    ("tree",   208,   352),   # col 13
+    ("tree",   768,   352),   # col 48
+    ("tree",   928,   352),   # col 58
+    # Row 19  (tile top y = 304)
+    ("barrel",  64,   304),   # col  4, left wood platform
+    ("barrel", 896,   304),   # col 56, right wood platform
+    # Row 16 shop platform  (tile top y = 256)
+    ("crate",  272,   256),   # col 17
+    ("crate",  720,   256),   # col 45
+    # Row 13 mid platforms  (tile top y = 208)
+    ("crate",  288,   208),   # col 18
+    ("crate",  656,   208),   # col 41
+    # Row 10 upper-mid  (tile top y = 160)
+    ("tree",   112,   160),   # col  7
+    ("tree",   832,   160),   # col 52
+    # Row 7 high  (tile top y = 112)
+    ("barrel", 480,   112),   # col 30, center grass
+    # Row 4 top  (tile top y = 64)
+    ("crate",  128,    64),   # col  8
+    ("crate",  800,    64),   # col 50
 ]
 
 BREAKABLE_HP = {"tree": 3, "barrel": 1, "crate": 2}

@@ -385,7 +385,14 @@ class GameClient:
             self.air_timer += 1
 
         if self.player_rect.y > 500:
-            self.local_alive = False
+            if self.local_alive:
+                self.local_alive = False
+                _send(self.sock, {"type": "fell_off"})
+                spawn_death_explosion(
+                    self.particles,
+                    self.player_rect.centerx, self.player_rect.centery,
+                    tuple(self.my_team_color),
+                )
 
         _send(self.sock, {
             "type":      "state",

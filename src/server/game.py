@@ -360,6 +360,28 @@ class GameServer:
                     })
                     break
 
+    def _kill_player_env(self, player_id: int) -> None:
+        """Kill a player due to the environment (fall off map, no killer)."""
+        p = self.players.get(player_id)
+        if not p or not p.alive:
+            return
+        p.alive         = False
+        p.hp            = 0
+        p.respawn_timer = RESPAWN_DELAY
+        self._drop_weapon(p)
+        self.broadcast({
+            "type":      "player_killed",
+            "victim_id": player_id,
+            "killer_id": -1,
+            "x": p.x, "y": p.y,
+        })
+
+    def tick_fall_deaths(self) -> None:
+        """Kill players whose server-side y has gone below the map (fell off)."""
+        for p in list(self.players.values()):
+            if p.alive and p.y > 450:
+                self._kill_player_env(p.player_id)
+
     def tick_respawns(self, dt: float) -> None:
         for p in list(self.players.values()):
             if not p.alive and p.respawn_timer > 0:
@@ -497,6 +519,10 @@ class GameServer:
                 p.on_ground = bool(msg.get("on_ground", False))
                 p.facing    = msg.get("facing", p.facing)
 
+        elif mtype == "fell_off":
+            if self.game_started:
+                self._kill_player_env(player_id)
+
         elif mtype == "throw":
             if self.game_started:
                 p = self.players.get(player_id)
@@ -571,6 +597,7 @@ class GameServer:
             time.sleep(interval)
             with self.lock:
                 if self.game_started and self.players:
+                    self.tick_fall_deaths()
                     self.tick_respawns(interval)
                     self.tick_projectiles(interval)
                     self.tick_power_ups(interval)

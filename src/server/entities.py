@@ -32,12 +32,15 @@ def _tile_solid(col: int, row: int) -> bool:
     return col < len(row_str) and row_str[col] in TILE_SOLID
 
 
-# Valid spawn positions: solid tile with empty tile directly above
+# Valid spawn positions: solid tile with at least 2 empty tiles above it,
+# capped at row 22 (row 23+ is the underground – never spawn there).
 _VALID_FLOOR = [
     (c * _TILE_SZ, r * _TILE_SZ)
-    for r in range(1, _MAP_ROWS)
+    for r in range(2, min(_MAP_ROWS, 23))   # stop before underground
     for c in range(_MAP_COLS)
-    if _tile_solid(c, r) and not _tile_solid(c, r - 1)
+    if _tile_solid(c, r)
+    and not _tile_solid(c, r - 1)
+    and not _tile_solid(c, r - 2)
 ]
 
 
