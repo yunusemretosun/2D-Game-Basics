@@ -145,14 +145,14 @@ class GameServer:
         if now < p.reload_until:
             return
 
-        weapon   = WEAPONS.get(p.weapon, WEAPONS["pistol"])
-        speed    = weapon["bullet_speed"]
-        range_px = float(weapon["range_px"])
-        # Safety lifetime: slightly longer than the time it takes to travel range_px
-        # at its full speed, so range_px check is always the primary terminator.
-        lifetime = range_px / (speed * 60) * 1.5 + 0.5
-        damage   = weapon["damage"]
-        p.reload_until = now + weapon["reload_time"]
+        weapon      = WEAPONS.get(p.weapon, WEAPONS["pistol"])
+        speed       = weapon["bullet_speed"]
+        range_px    = float(weapon["range_px"])
+        lifetime    = range_px / (speed * 60) * 1.5 + 0.5
+        damage      = weapon["damage"]
+        # Apply rapid-fire: server checks its own rapid_fire_until, not the client's
+        rf_mult     = 0.33 if now < p.rapid_fire_until else 1.0
+        p.reload_until = now + weapon["reload_time"] * rf_mult
 
         for i in range(weapon["pellets"]):
             pid = self.next_proj_id
@@ -334,33 +334,14 @@ class GameServer:
             self.projectiles.pop(pid, None)
 
     def tick_dropped_weapons(self, dt: float) -> None:
+        """Advance lifetime timers; pickup is now E-key driven (pick_weapon msg)."""
         to_remove = []
         for drop_id, drop in list(self.dropped_weapons.items()):
             drop.lifetime     -= dt
             drop.pickup_delay -= dt
-
             if drop.lifetime <= 0:
                 to_remove.append(drop_id)
                 self.broadcast({"type": "weapon_gone", "drop_id": drop_id})
-                continue
-
-            # Only allow pickup after the delay has elapsed
-            if drop.pickup_delay > 0:
-                continue
-
-            for plr in list(self.players.values()):
-                if not plr.alive:
-                    continue
-                if (plr.x < drop.x + 14 and plr.x + PLAYER_W > drop.x and
-                        plr.y < drop.y + 14 and plr.y + PLAYER_H > drop.y):
-                    to_remove.append(drop_id)
-                    plr.weapon = drop.weapon_id
-                    self.broadcast({
-                        "type": "weapon_pickup",
-                        "drop_id": drop_id, "player_id": plr.player_id,
-                        "weapon_id": drop.weapon_id,
-                    })
-                    break
 
         for drop_id in to_remove:
             self.dropped_weapons.pop(drop_id, None)
@@ -402,6 +383,8 @@ class GameServer:
                     duration = POWER_UP_DURATIONS[pu.pu_type]
                     if pu.pu_type == "shield":
                         plr.shield_until = now + duration
+                    elif pu.pu_type == "rapid_fire":
+                        plr.rapid_fire_until = now + duration
                     self.broadcast({
                         "type": "powerup_pickup", "pu_id": pu.pu_id,
                         "pu_type": pu.pu_type, "player_id": plr.player_id,
@@ -513,11 +496,12 @@ class GameServer:
         now   = time.time()
         p.x, p.y      = rand_player_pos()
         p.vx = p.vy   = 0.0
-        p.alive        = True
-        p.hp           = PLAYER_MAX_HP
-        p.respawn_timer = 0.0
+        p.alive           = True
+        p.hp              = PLAYER_MAX_HP
+        p.respawn_timer   = 0.0
+        p.rapid_fire_until = 0.0   # clear rapid-fire on death
         # Brief invincibility so respawned players aren't immediately killed
-        p.shield_until = now + RESPAWN_SHIELD
+        p.shield_until    = now + RESPAWN_SHIELD
         self.broadcast({
             "type": "respawn", "player_id": player_id,
             "x": p.x, "y": p.y, "hp": p.hp,
@@ -571,6 +555,29 @@ class GameServer:
         elif mtype == "fell_off":
             if self.game_started:
                 self._kill_player_env(player_id)
+
+        elif mtype == "pick_weapon":
+            if not self.game_started:
+                return
+            p = self.players.get(player_id)
+            if not p or not p.alive:
+                return
+            drop_id = msg.get("drop_id")
+            drop = self.dropped_weapons.get(drop_id)
+            if not drop or drop.pickup_delay > 0:
+                return
+            # Server-side range check (50 px from player center to drop)
+            dx = (p.x + PLAYER_W / 2) - (drop.x + PLAYER_W / 2)
+            dy = (p.y + PLAYER_H / 2) - drop.y
+            if dx * dx + dy * dy > 50 * 50:
+                return
+            self.dropped_weapons.pop(drop_id, None)
+            p.weapon = drop.weapon_id
+            self.broadcast({
+                "type": "weapon_pickup",
+                "drop_id": drop_id, "player_id": player_id,
+                "weapon_id": drop.weapon_id,
+            })
 
         elif mtype == "throw":
             if self.game_started:
