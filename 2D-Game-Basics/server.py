@@ -1,3 +1,4 @@
+import os
 import socket
 import threading
 import json
@@ -51,18 +52,51 @@ POWER_UP_COLORS = {
     "double_jump": [200, 0, 255],
 }
 
-# Fixed spawn positions on the map (on top of platforms/floor tiles)
-POWER_UP_SPAWN_LOCATIONS = [
-    (112, 316),   # left area, main floor
-    (288, 316),   # left-center, main floor
-    (480, 224),   # on center mid-platform (row 16)
-    (672, 316),   # right-center, main floor
-    (848, 316),   # right area, main floor
-    (320, 156),   # on a mid-height platform
-    (640, 156),   # on a mid-height platform (other side)
+NUM_POWER_UPS = 7  # total power-ups on the map at once
+
+POWER_UP_RESPAWN_TIME = 15.0  # seconds until a collected/expired power-up reappears
+POWER_UP_LIFETIME     = 12.0  # seconds an active power-up stays before relocating
+
+# ── Map parsing: find valid spawn tiles ───────────────────────────────────────
+def _load_server_map():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "map.txt")
+    try:
+        with open(path) as f:
+            return [ln.rstrip('\n') for ln in f if ln.rstrip('\n')]
+    except FileNotFoundError:
+        return []
+
+_GAME_MAP  = _load_server_map()
+_MAP_ROWS  = len(_GAME_MAP)
+_MAP_COLS  = max((len(r) for r in _GAME_MAP), default=0)
+_TILE_SZ   = 16
+
+def _tile_solid(col: int, row: int) -> bool:
+    if row < 0 or row >= _MAP_ROWS or col < 0:
+        return True
+    row_str = _GAME_MAP[row]
+    return col < len(row_str) and row_str[col] != '0'
+
+# Every floor tile: solid tile that has an empty tile directly above it
+_VALID_FLOOR = [
+    (c * _TILE_SZ, r * _TILE_SZ)
+    for r in range(1, _MAP_ROWS)
+    for c in range(_MAP_COLS)
+    if _tile_solid(c, r) and not _tile_solid(c, r - 1)
 ]
 
-POWER_UP_RESPAWN_TIME = 15.0  # seconds until power-up reappears
+def _rand_spawn(entity_height: int):
+    """Return (x, y) world-pixel top-left so entity stands on a valid floor tile."""
+    if not _VALID_FLOOR:
+        return 100.0, 100.0
+    x, floor_y = random.choice(_VALID_FLOOR)
+    return float(x), float(floor_y - entity_height)
+
+def rand_player_pos():
+    return _rand_spawn(13)   # player height = 13 px
+
+def rand_powerup_pos():
+    return _rand_spawn(10)   # power-up height = 10 px
 
 
 @dataclass
@@ -103,6 +137,7 @@ class PowerUp:
     spawn_y: float
     active: bool = True
     respawn_timer: float = 0.0
+    lifetime_timer: float = POWER_UP_LIFETIME  # despawn after this many seconds
 
 
 class GameServer:
@@ -176,12 +211,13 @@ class GameServer:
             p.alive = True
             p.shield_until = 0.0
 
-        # Initialize power-ups at fixed locations, cycling through types
+        # Initialize power-ups at random valid positions (not inside tiles)
         shuffled_types = POWER_UP_TYPES.copy()
         random.shuffle(shuffled_types)
-        for i, (sx, sy) in enumerate(POWER_UP_SPAWN_LOCATIONS):
+        for i in range(NUM_POWER_UPS):
             pu_type = shuffled_types[i % len(shuffled_types)]
-            pu = PowerUp(pu_id=i, pu_type=pu_type, spawn_x=float(sx), spawn_y=float(sy))
+            px, py = rand_powerup_pos()
+            pu = PowerUp(pu_id=i, pu_type=pu_type, spawn_x=px, spawn_y=py)
             self.power_ups[i] = pu
 
         for p in self.players.values():
@@ -269,11 +305,23 @@ class GameServer:
             if not pu.active:
                 pu.respawn_timer -= dt
                 if pu.respawn_timer <= 0:
+                    # Reactivate at a NEW random valid position (not inside tiles)
+                    pu.spawn_x, pu.spawn_y = rand_powerup_pos()
                     pu.active = True
+                    pu.lifetime_timer = POWER_UP_LIFETIME
                     # Cycle to next type
                     idx = POWER_UP_TYPES.index(pu.pu_type)
                     pu.pu_type = POWER_UP_TYPES[(idx + 1) % len(POWER_UP_TYPES)]
                 continue
+
+            # Count down active lifetime; expire and relocate when it runs out
+            pu.lifetime_timer -= dt
+            if pu.lifetime_timer <= 0:
+                pu.active = False
+                pu.respawn_timer = POWER_UP_RESPAWN_TIME
+                self.broadcast({"type": "powerup_expired", "pu_id": pu.pu_id})
+                continue
+
             # Check player pickup (power-up hitbox 10x10)
             for plr in list(self.players.values()):
                 if not plr.alive:
@@ -328,6 +376,7 @@ class GameServer:
                     "y": pu.spawn_y,
                     "type": pu.pu_type,
                     "active": pu.active,
+                    "lifetime": pu.lifetime_timer,
                 }
                 for pu in self.power_ups.values()
             },
@@ -360,15 +409,8 @@ class GameServer:
 
     def respawn_player(self, player_id: int) -> None:
         p = self.players[player_id]
-        spawns = TEAM_SPAWN_AREAS.get(p.team_id, TEAM_SPAWN_AREAS[0])
-        team_members = [pp for pp in self.players.values() if pp.team_id == p.team_id]
-        idx = 0
-        for i, pp in enumerate(team_members):
-            if pp.player_id == player_id:
-                idx = i % len(spawns)
-                break
-        sx, sy = spawns[idx]
-        p.x, p.y = float(sx), float(sy)
+        # Spawn at a random valid floor position anywhere on the map
+        p.x, p.y = rand_player_pos()
         p.vx = p.vy = 0.0
         p.alive = True
         p.hp = PLAYER_MAX_HP
