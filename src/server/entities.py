@@ -2,8 +2,9 @@
 import random
 from dataclasses import dataclass, field
 from src.constants import (
-    ASSETS_DIR, PLAYER_MAX_HP, STARTING_COINS,
-    POWER_UP_LIFETIME, DROPPED_WEAPON_LIFE,
+    ASSETS_DIR, PLAYER_MAX_HP, PLAYER_W, PLAYER_H,
+    STARTING_COINS, POWER_UP_LIFETIME, DROPPED_WEAPON_LIFE,
+    TILE_SOLID,
 )
 
 # ── Map loading ───────────────────────────────────────────────────────────────
@@ -28,10 +29,10 @@ def _tile_solid(col: int, row: int) -> bool:
     if row < 0 or row >= _MAP_ROWS or col < 0:
         return True
     row_str = _GAME_MAP[row]
-    return col < len(row_str) and row_str[col] != "0"
+    return col < len(row_str) and row_str[col] in TILE_SOLID
 
 
-# All tiles that are solid with empty tile directly above → valid spawn floor
+# Valid spawn positions: solid tile with empty tile directly above
 _VALID_FLOOR = [
     (c * _TILE_SZ, r * _TILE_SZ)
     for r in range(1, _MAP_ROWS)
@@ -48,7 +49,7 @@ def _rand_spawn(entity_height: int):
 
 
 def rand_player_pos():
-    return _rand_spawn(13)
+    return _rand_spawn(PLAYER_H)
 
 
 def rand_powerup_pos():
@@ -74,7 +75,8 @@ class PlayerState:
     shield_until:   float = 0.0
     weapon:         str   = "pistol"
     coins:          int   = STARTING_COINS
-    reload_until:   float = 0.0   # server timestamp when next shot is allowed
+    reload_until:   float = 0.0
+    kills:          int   = 0
 
 
 @dataclass
@@ -104,8 +106,20 @@ class PowerUp:
 
 @dataclass
 class DroppedWeapon:
-    drop_id:   int
-    weapon_id: str
+    drop_id:       int
+    weapon_id:     str
+    x:             float
+    y:             float
+    lifetime:      float = DROPPED_WEAPON_LIFE
+    pickup_delay:  float = 0.6   # seconds before it can be picked up
+
+
+@dataclass
+class BreakableObject:
+    obj_id:    int
+    obj_type:  str       # "tree" | "barrel" | "crate"
     x:         float
     y:         float
-    lifetime:  float = DROPPED_WEAPON_LIFE
+    hp:        int
+    max_hp:    int
+    alive:     bool = True
