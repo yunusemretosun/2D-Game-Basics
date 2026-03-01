@@ -19,39 +19,71 @@ SERVER_PORT = 5555
 # ── Player ────────────────────────────────────────────────────────────────────
 PLAYER_MAX_HP    = 100
 RESPAWN_DELAY    = 3.0
-PLAYER_W, PLAYER_H = 5, 13
+RESPAWN_SHIELD   = 2.0   # seconds of invincibility after respawn
+PLAYER_W, PLAYER_H = 8, 16
+
+# ── Win condition ─────────────────────────────────────────────────────────────
+# First team to reach KILL_LIMIT total kills wins (or play forever if 0)
+KILL_LIMIT = 15
 
 # ── Teams ─────────────────────────────────────────────────────────────────────
 TEAM_COLORS = [
-    [220, 60,  60],
-    [60,  100, 220],
-    [60,  200, 60],
-    [220, 180, 50],
-    [180, 60,  220],
-    [60,  200, 200],
+    [210,  55,  55],   # Red
+    [ 55, 100, 215],   # Blue
+    [ 45, 185,  55],   # Green
+    [210, 175,  45],   # Yellow
+    [170,  55, 215],   # Purple
+    [ 45, 195, 195],   # Cyan
 ]
 TEAM_NAMES  = ["Red", "Blue", "Green", "Yellow", "Purple", "Cyan"]
 
-# Initial team spawn positions (before random respawn kicks in)
 TEAM_SPAWN_AREAS = {
-    0: [(48, 248), (64, 248), (80, 248)],
-    1: [(896, 248), (880, 248), (864, 248)],
-    2: [(240, 212), (256, 212), (272, 212)],
+    0: [(48, 336), (64, 336), (80, 336)],
+    1: [(896, 336), (880, 336), (864, 336)],
+    2: [(240, 336), (256, 336), (272, 336)],
 }
+
+# ── Tiles ─────────────────────────────────────────────────────────────────────
+# 0=empty  1=dirt  2=grass  3=stone  4=wood  5=brick
+TILE_SOLID = {'1', '2', '3', '4', '5'}
 
 # ── Shop ──────────────────────────────────────────────────────────────────────
 SHOP_X      = 464
 SHOP_Y      = 256
-SHOP_RADIUS = 55
+SHOP_RADIUS = 60
 
 # ── Economy ───────────────────────────────────────────────────────────────────
 STARTING_COINS      = 30
 KILL_COIN_REWARD    = 15
-DROPPED_WEAPON_LIFE = 20.0   # seconds before uncollected weapon disappears
+DROPPED_WEAPON_LIFE = 20.0
+WEAPON_PICKUP_DELAY = 0.6    # seconds before a freshly dropped weapon can be picked up
+
+# ── Breakable objects ─────────────────────────────────────────────────────────
+# (type, world_x, world_y_base)  – y_base = top of the tile they stand on
+BREAKABLE_DEFS = [
+    # type,     wx,   wy-tile-top         (object is drawn above tile top)
+    ("tree",    80,   336),   # ground left
+    ("tree",   208,   336),
+    ("barrel", 320,   336),   # near pit
+    ("barrel", 592,   336),
+    ("tree",   720,   336),
+    ("tree",   880,   336),
+    ("crate",  336,   256),   # shop platform
+    ("crate",  576,   256),
+    ("barrel",  64,   304),   # low wood platform (row 19)
+    ("barrel", 832,   304),
+    ("crate",  304,   208),   # mid platform
+    ("crate",  448,   208),
+    ("tree",   192,   160),   # high platform
+    ("tree",   544,   160),
+    ("barrel", 304,   112),   # very high
+]
+
+BREAKABLE_HP = {"tree": 3, "barrel": 1, "crate": 2}
+BREAKABLE_COIN_RANGE = {"tree": (8, 16), "barrel": (4, 10), "crate": (6, 14)}
+BREAKABLE_PROJECTILE_DAMAGE = 10   # bullets deal this much to objects
 
 # ── Weapons ───────────────────────────────────────────────────────────────────
-# fire_mode: "semi" = one shot per key press | "auto" = hold to fire
-# bullet lifetime = range_px / (bullet_speed * 60)  (matches server tick math)
 WEAPONS = {
     "pistol": {
         "name": "Pistol", "fire_mode": "semi",
@@ -117,7 +149,6 @@ WEAPON_COLORS = {
     "shotgun":   (255, 140,  40),
 }
 
-# (trail_length, line_width) for draw_bullet
 WEAPON_BULLET_SIZE = {
     "pistol":    (6,  2),
     "auto":      (8,  2),
@@ -151,5 +182,5 @@ PU_FULL_NAMES = {
 }
 
 # ── Window ────────────────────────────────────────────────────────────────────
-WINDOW_SIZE = (800, 600)
+WINDOW_SIZE  = (800, 600)
 DISPLAY_SIZE = (400, 300)
