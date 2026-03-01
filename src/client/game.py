@@ -355,6 +355,26 @@ class GameClient:
             elif mtype == "player_left":
                 self.remote_players.pop(str(msg.get("player_id")), None)
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _find_nearby_dropped_weapon(self):
+        """Return the drop_id (int) of the closest droppable weapon within 32 px,
+        or None if nothing is nearby. Uses world coordinates."""
+        if not self.local_alive:
+            return None
+        cx = self.player_rect.centerx
+        cy = self.player_rect.centery
+        best_id   = None
+        best_dist = 32 * 32   # squared radius
+        for did, dw in self.dropped_weapons_world.items():
+            dx = dw["x"] + PLAYER_W // 2 - cx
+            dy = dw["y"] - cy
+            d2 = dx * dx + dy * dy
+            if d2 <= best_dist:
+                best_dist = d2
+                best_id   = int(did)
+        return best_id
+
     # ── Physics ───────────────────────────────────────────────────────────────
 
     def _step_physics(self, tile_rects, now):
@@ -462,7 +482,14 @@ class GameClient:
                             _send(self.sock, {"type": "throw", "facing": self.facing_dir})
 
                 if event.key == K_e and self.local_alive:
-                    self.shop_open = False if self.shop_open else (True if self.near_shop else False)
+                    if self.shop_open:
+                        self.shop_open = False
+                    else:
+                        drop_id = self._find_nearby_dropped_weapon()
+                        if drop_id is not None:
+                            _send(self.sock, {"type": "pick_weapon", "drop_id": drop_id})
+                        elif self.near_shop:
+                            self.shop_open = True
 
                 if self.shop_open and self.local_alive and self._weapons:
                     wlist = list(self._weapons.keys())
@@ -549,11 +576,13 @@ class GameClient:
             display.blit(hint, (sx - hint.get_width() // 2, sy - 60))
 
         # Dropped weapons
-        for dw in self.dropped_weapons_world.values():
+        near_drop_id = self._find_nearby_dropped_weapon()
+        for did, dw in self.dropped_weapons_world.items():
             draw_dropped_weapon(
                 display,
                 int(dw["x"]) - scroll[0], int(dw["y"]) - scroll[1],
                 dw.get("weapon_id", "pistol"), dw.get("lifetime", DROPPED_WEAPON_LIFE),
+                near=(did == str(near_drop_id)),
             )
 
         # Power-ups
@@ -685,7 +714,7 @@ class GameClient:
         draw_score_hud(surf, self.team_kills, self.my_team_id, self.kill_limit)
 
         # Controls hint
-        hint = assets.font_small.render("[F] Fire  [E] Shop  [Arrows] Move", True, (180, 180, 180))
+        hint = assets.font_small.render("[F] Fire  [E] Shop/Pick  [Arrows] Move", True, (180, 180, 180))
         surf.blit(hint, (200 - hint.get_width() // 2, 292))
 
     def _draw_game_over(self, surf):

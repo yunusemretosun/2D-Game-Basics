@@ -285,26 +285,50 @@ def draw_bullet(surf: pygame.Surface, x: float, y: float,
 #  Dropped weapons
 # ─────────────────────────────────────────────────────────────────────────────
 def draw_dropped_weapon(surf: pygame.Surface, x: int, y: int,
-                        weapon_id: str, lifetime: float) -> None:
+                        weapon_id: str, lifetime: float,
+                        near: bool = False) -> None:
+    """Draw a dropped weapon as a small circle containing the weapon sprite.
+
+    x, y are the top-left of the original player rect; we centre the icon
+    at (x + PLAYER_W//2, y + PLAYER_H//2).
+    """
+    cx = x + PLAYER_W // 2
+    cy = y + PLAYER_H // 2
+
+    # Blink when about to despawn
     if lifetime < 5.0 and int(time.time() * 5) % 2 == 0:
         return
-    sprite = assets.weapon_imgs.get(weapon_id)
+
     color  = WEAPON_COLORS.get(weapon_id, (200, 200, 200))
+    RADIUS = 9
+
+    # Dark filled circle + coloured border
+    pygame.draw.circle(surf, (20, 20, 35), (cx, cy), RADIUS)
+    border_col = (255, 240, 80) if near else color
+    pygame.draw.circle(surf, border_col, (cx, cy), RADIUS, 2)
+
+    # Weapon sprite scaled to fit inside the circle
+    sprite = assets.weapon_imgs.get(weapon_id)
     if sprite:
-        surf.blit(sprite, (x, y))
-        pygame.draw.rect(surf, color, (x, y, sprite.get_width(), sprite.get_height()), 1)
-    else:
-        pygame.draw.rect(surf, color, (x, y, 12, 5))
-        pygame.draw.rect(surf, (255, 255, 255), (x, y, 12, 5), 1)
+        sw, sh = sprite.get_size()
+        inner  = (RADIUS - 2) * 2
+        scale  = min(inner / max(sw, 1), inner / max(sh, 1))
+        nw     = max(1, int(sw * scale))
+        nh     = max(1, int(sh * scale))
+        scaled = pygame.transform.scale(sprite, (nw, nh))
+        surf.blit(scaled, (cx - nw // 2, cy - nh // 2))
 
-    wname = WEAPONS.get(weapon_id, {}).get("name", weapon_id)
-    lbl   = assets.font_small.render(wname, True, color)
-    surf.blit(lbl, (x + 6 - lbl.get_width() // 2, y - 10))
+    # [E] hint floats above the circle, only shown when player is close
+    if near:
+        hint = assets.font_small.render("[E]", True, (255, 240, 80))
+        surf.blit(hint, (cx - hint.get_width() // 2, cy - RADIUS - 10))
 
+    # Thin lifetime bar beneath the circle
     frac    = max(0.0, lifetime / DROPPED_WEAPON_LIFE)
-    bar_col = (255, 60, 60) if frac < 0.3 else (255, 200, 0) if frac < 0.6 else (100, 220, 100)
-    pygame.draw.rect(surf, (40, 40, 40), (x - 1, y + 6, 14, 2))
-    pygame.draw.rect(surf, bar_col, (x - 1, y + 6, max(1, int(14 * frac)), 2))
+    bar_w   = RADIUS * 2
+    bar_col = (255, 60, 60) if frac < 0.3 else (255, 200, 0) if frac < 0.6 else (80, 200, 80)
+    pygame.draw.rect(surf, (40, 40, 40), (cx - RADIUS, cy + RADIUS + 2, bar_w, 2))
+    pygame.draw.rect(surf, bar_col, (cx - RADIUS, cy + RADIUS + 2, max(1, int(bar_w * frac)), 2))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -76,6 +76,7 @@ class PlayerState:
     respawn_timer:  float = 0.0
     ready:          bool  = False
     shield_until:   float = 0.0
+    rapid_fire_until: float = 0.0  # server-side rapid-fire expiry
     weapon:         str   = "pistol"
     coins:          int   = STARTING_COINS
     reload_until:   float = 0.0
